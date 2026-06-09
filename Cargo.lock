@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "RustDB"
+name = "GeodeDB"
 version = "0.1.0"

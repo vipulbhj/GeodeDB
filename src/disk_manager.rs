@@ -1,7 +1,6 @@
 use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
-    mem,
 };
 
 const SLOT_SIZE: u16 = 4;
