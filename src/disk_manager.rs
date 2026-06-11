@@ -12,7 +12,8 @@ pub struct DiskManager {
     page_count: u64,
 }
 
-struct Page {
+#[derive(Debug, Clone)]
+pub struct Page {
     memory: [u8; PAGE_SIZE as usize],
 }
 
@@ -28,7 +29,7 @@ struct Slot {
 }
 
 impl Page {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let mut memory = [0; PAGE_SIZE as usize];
         memory[2..4].copy_from_slice(&u16::to_le_bytes(HEADER_SIZE));
         memory[4..6].copy_from_slice(&u16::to_le_bytes(PAGE_SIZE));
@@ -148,7 +149,7 @@ impl Page {
         Some(())
     }
 
-    fn as_bytes(&self) -> &[u8] {
+    pub fn as_bytes(&self) -> &[u8] {
         &self.memory
     }
 }
