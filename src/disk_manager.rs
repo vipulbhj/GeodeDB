@@ -17,15 +17,11 @@ pub struct Page {
     memory: [u8; PAGE_SIZE as usize],
 }
 
+#[derive(Debug)]
 struct PageHeader {
     slot_count: u16,
     front_pointer: u16,
     back_pointer: u16,
-}
-
-struct Slot {
-    offset: u16,
-    length: u16,
 }
 
 impl Page {
@@ -33,16 +29,17 @@ impl Page {
         let mut memory = [0; PAGE_SIZE as usize];
         memory[2..4].copy_from_slice(&u16::to_le_bytes(HEADER_SIZE));
         memory[4..6].copy_from_slice(&u16::to_le_bytes(PAGE_SIZE));
+
         Page { memory: memory }
     }
 
-    fn from_bytes(buffer: &[u8]) -> Self {
+    pub fn from_bytes(buffer: &[u8]) -> Self {
         let mut memory = [0; PAGE_SIZE as usize];
         memory.copy_from_slice(buffer);
         Page { memory: memory }
     }
 
-    fn header(&self) -> PageHeader {
+    pub fn header(&self) -> PageHeader {
         let slot_count = u16::from_le_bytes(self.memory[0..2].try_into().unwrap());
         let front_pointer = u16::from_le_bytes(self.memory[2..4].try_into().unwrap());
         let back_pointer = u16::from_le_bytes(self.memory[4..6].try_into().unwrap());
@@ -66,7 +63,7 @@ impl Page {
         self
     }
 
-    fn insert_tuple(&mut self, data: &[u8]) -> Option<u16> {
+    pub fn insert_tuple(&mut self, data: &[u8]) -> Option<u16> {
         let data_length = data.len();
         let mut header = self.header();
         let space_left = header.back_pointer - header.front_pointer - SLOT_SIZE;
@@ -75,30 +72,30 @@ impl Page {
             return None;
         }
 
+        // Prepare
+        let slot_idx = header.slot_count;
         let front = header.front_pointer as usize;
         let back = header.back_pointer as usize;
+        let slot_offset = back - data_length;
+        let slot_len = data_length;
 
         // Write Slot
-        self.memory[front..(front + 2)]
-            .copy_from_slice(&u16::to_le_bytes(back as u16 - data_length as u16));
-        self.memory[(front + 2)..(front + 4)]
-            .copy_from_slice(&u16::to_le_bytes(data_length as u16));
+        self.memory[front..(front + 2)].copy_from_slice(&u16::to_le_bytes(slot_offset as u16));
+        self.memory[(front + 2)..(front + 4)].copy_from_slice(&u16::to_le_bytes(slot_len as u16));
 
-        // Write Tuple
+        // // Write Data
         self.memory[(back - data_length)..back].copy_from_slice(data);
 
-        let slot_idx = header.slot_count;
-
+        // Update Header
         header.slot_count += 1;
         header.front_pointer += SLOT_SIZE;
         header.back_pointer -= data_length as u16;
-
         self.write_header(&header);
 
         Some(slot_idx)
     }
 
-    fn get_tuple(&mut self, slot_idx: u16) -> Option<&[u8]> {
+    pub fn get_tuple(&mut self, slot_idx: u16) -> Option<&[u8]> {
         let header = self.header();
 
         if slot_idx >= header.slot_count {
@@ -122,7 +119,7 @@ impl Page {
         Some(tuple)
     }
 
-    fn delete_tuple(&mut self, slot_idx: u16) -> Option<()> {
+    pub fn delete_tuple(&mut self, slot_idx: u16) -> Option<()> {
         let header = self.header();
 
         if slot_idx >= header.slot_count {
@@ -192,13 +189,12 @@ impl DiskManager {
             ));
         }
 
+        let page_offset = page_idx * PAGE_SIZE as u64;
         let mut buffer = [0u8; PAGE_SIZE as usize];
 
-        let page_offset = page_idx * PAGE_SIZE as u64;
+        self.db.seek(SeekFrom::Start(page_offset)).unwrap();
 
-        self.db.seek(SeekFrom::Start(page_offset))?;
-
-        self.db.read_exact(&mut buffer)?;
+        self.db.read_exact(&mut buffer).unwrap();
 
         Ok(Page::from_bytes(&buffer))
     }
@@ -227,21 +223,22 @@ impl DiskManager {
 
         let page_offset = page_idx * PAGE_SIZE as u64;
 
-        self.db.seek(SeekFrom::Start(page_offset as u64))?;
+        self.db.seek(SeekFrom::Start(page_offset as u64)).unwrap();
 
-        self.db.write(buffer)?;
+        self.db.write(buffer).unwrap();
 
-        self.db.flush()?;
+        self.db.flush().unwrap();
 
         Ok(())
     }
 
     pub fn allocate_page(&mut self) -> io::Result<u64> {
-        let page = self.page_count;
+        let page_count = self.page_count;
+        let page = Page::new();
 
-        self.write_page(page, &[0; PAGE_SIZE as usize])?;
+        self.write_page(page_count, page.as_bytes()).unwrap();
         self.page_count += 1;
 
-        Ok(page)
+        Ok(page_count)
     }
 }

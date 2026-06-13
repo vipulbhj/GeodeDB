@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::ops::{Deref, DerefMut};
 
 use crate::disk_manager::{DiskManager, Page};
 use crate::ring_buffer::RingBuffer;
@@ -14,13 +15,42 @@ struct Frame {
     disk_manager_page_id: u64,
 }
 
+type PoolIdx = usize;
+type PageIdx = usize;
+
 struct BufferPoolManager {
     acces_counter: usize,
     buffer_pool: Vec<Frame>,
     disk_manager: DiskManager,
-    free_slots: VecDeque<usize>,
-    pool_index: HashMap<usize, usize>,
-    lru_k_history: HashMap<usize, RingBuffer<usize>>,
+    free_slots: VecDeque<PoolIdx>,
+    pool_index: HashMap<PageIdx, PoolIdx>,
+    lru_k_history: HashMap<PageIdx, RingBuffer<usize>>,
+}
+
+struct PageGuard<'a> {
+    frame: &'a mut Frame,
+}
+
+impl<'a> Drop for PageGuard<'a> {
+    fn drop(&mut self) {
+        self.frame.pin_count -= 1;
+    }
+}
+
+impl<'a> Deref for PageGuard<'a> {
+    type Target = Page;
+
+    fn deref(&self) -> &Self::Target {
+        &self.frame.page
+    }
+}
+
+impl<'a> DerefMut for PageGuard<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.frame.dirty = true;
+
+        &mut self.frame.page
+    }
 }
 
 impl BufferPoolManager {
@@ -29,9 +59,9 @@ impl BufferPoolManager {
 
         let buffer_pool = (0..POOL_SIZE)
             .map(|_| Frame {
-                page: Page::new(),
                 dirty: false,
                 pin_count: 0,
+                page: Page::new(),
                 disk_manager_page_id: 0,
             })
             .collect();
@@ -72,39 +102,30 @@ impl BufferPoolManager {
     fn find_or_create_page_slot(&mut self) -> usize {
         match self.free_slots.pop_front() {
             None => {
-                let unpinned_frame_indexes: Vec<usize> = self
+                let unpinned_frame_page_indexes: Vec<PageIdx> = self
                     .buffer_pool
                     .iter()
-                    .enumerate()
-                    .filter(|(_, f)| f.pin_count == 0)
-                    .map(|(i, _)| i)
+                    .filter(|f| f.pin_count == 0)
+                    .map(|f| f.disk_manager_page_id as usize)
                     .collect();
 
-                let lru_k_unpinned = unpinned_frame_indexes
+                let lru_k_unpinned = unpinned_frame_page_indexes
                     .iter()
                     .map(|&frame_idx| (frame_idx, &self.lru_k_history[&frame_idx]));
 
-                let lru_k_under_capacity = lru_k_unpinned.clone().filter(|(i, rb)| rb.capacity < K);
+                let has_under_capacity = lru_k_unpinned.clone().any(|(_, rb)| rb.size() < K);
+                let lru_k =
+                    lru_k_unpinned.filter(move |(_, rb)| !has_under_capacity || rb.size() < K);
 
-                if lru_k_under_capacity.clone().collect::<Vec<_>>().len() > 0 {
-                    let (frame_index_to_evict, _) = lru_k_under_capacity
-                        .map(|(f_idx, r)| (f_idx, r.front().unwrap()))
-                        .min_by_key(|(_, lru)| **lru)
-                        .unwrap();
+                let (frame_page_idx_to_evict, _) = lru_k
+                    .map(|(f_idx, r)| (f_idx, r.front().unwrap()))
+                    .min_by_key(|(_, lru)| **lru)
+                    .unwrap();
 
-                    self.evict_frame_index(&frame_index_to_evict);
+                let pool_idx = self.pool_index[&frame_page_idx_to_evict];
+                self.evict_frame_index(&pool_idx);
 
-                    frame_index_to_evict
-                } else {
-                    let (frame_index_to_evict, _) = lru_k_unpinned
-                        .map(|(i, rb)| (i, rb.front().unwrap()))
-                        .min_by_key(|(_, lru)| **lru)
-                        .unwrap();
-
-                    self.evict_frame_index(&frame_index_to_evict);
-
-                    frame_index_to_evict
-                }
+                pool_idx
             }
             f_res => match f_res {
                 Some(s) => s,
@@ -115,7 +136,7 @@ impl BufferPoolManager {
         }
     }
 
-    pub fn fetch_page(&mut self, page_idx: usize) -> &Page {
+    pub fn fetch_page<'a>(&'a mut self, page_idx: usize) -> PageGuard<'a> {
         let acces_counter = self.acces_counter;
 
         match self.pool_index.get(&page_idx) {
@@ -127,11 +148,15 @@ impl BufferPoolManager {
                     .unwrap()
                     .push(acces_counter);
                 self.acces_counter += 1;
-                &self.buffer_pool[idx].page
+
+                PageGuard {
+                    frame: &mut self.buffer_pool[idx],
+                }
             }
             None => {
                 let free_slot_index = self.find_or_create_page_slot();
                 let page = self.disk_manager.read_page(page_idx as u64).unwrap();
+
                 self.buffer_pool[free_slot_index] = Frame {
                     page: page,
                     dirty: false,
@@ -146,27 +171,10 @@ impl BufferPoolManager {
 
                 self.acces_counter += 1;
 
-                &self.buffer_pool[free_slot_index].page
+                PageGuard {
+                    frame: &mut self.buffer_pool[free_slot_index],
+                }
             }
         }
-    }
-
-    pub fn unpin_page(&mut self, page_idx: usize, dirty: bool) -> bool {
-        let Some(&bp_idx) = self.pool_index.get(&page_idx) else {
-            return false;
-        };
-
-        let Some(frame) = self.buffer_pool.get_mut(bp_idx) else {
-            return false;
-        };
-
-        if frame.pin_count == 0 {
-            return false;
-        }
-
-        frame.pin_count -= 1;
-        frame.dirty |= dirty;
-
-        true
     }
 }
